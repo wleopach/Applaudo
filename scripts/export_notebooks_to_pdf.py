@@ -24,6 +24,9 @@ from typing import List
 
 from traitlets.config import Config
 from nbconvert.exporters import WebPDFExporter
+from nbconvert.preprocessors import ExecutePreprocessor
+import nbformat
+from nbformat import v4 as nbf
 
 
 def find_notebooks(nb_dir: Path) -> List[Path]:
@@ -36,7 +39,7 @@ Chromium or Chrome installed and discoverable. If you see errors about Chromium,
 """
 
 
-def export_notebook_to_pdf(nb_path: Path, out_dir: Path, overwrite: bool = False) -> Path:
+def export_notebook_to_pdf(nb_path: Path, out_dir: Path, overwrite: bool = False, execute: bool = True) -> Path:
     cfg = Config()
     # Exclude code cell inputs
     cfg.TemplateExporter.exclude_input = True
@@ -46,12 +49,53 @@ def export_notebook_to_pdf(nb_path: Path, out_dir: Path, overwrite: bool = False
 
     exporter = WebPDFExporter(config=cfg)
 
+    # Load and (optionally) execute the notebook so outputs like plots are present
+    nb = nbformat.read(nb_path, as_version=4)
+
+    # Inject a hidden setup cell to ensure plots render as static images in headless mode
+    setup_code = (
+        "import os\n"
+        "# Use a non-interactive backend for matplotlib\n"
+        "try:\n"
+        "    import matplotlib\n"
+        "    matplotlib.use('Agg')\n"
+        "except Exception:\n"
+        "    pass\n"
+        "\n"
+        "# Force Plotly to render static images via kaleido so they show up in PDFs\n"
+        "try:\n"
+        "    import plotly.io as pio\n"
+        "    pio.renderers.default = 'png'\n"
+        "    try:\n"
+        "        # Optional: set some sane defaults for image size\n"
+        "        pio.kaleido.scope.default_format = 'png'\n"
+        "        pio.kaleido.scope.default_width = 1000\n"
+        "        pio.kaleido.scope.default_height = 600\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "except Exception:\n"
+        "    pass\n"
+    )
+    setup_cell = nbf.new_code_cell(setup_code, metadata={"tags": ["remove_input", "hide_input", "injected"], "editable": False})
+    if nb.cells and getattr(nb.cells[0], "cell_type", "") == "code":
+        nb.cells.insert(0, setup_cell)
+    else:
+        nb.cells = [setup_cell] + list(nb.cells)
+
+    if execute:
+        ep = ExecutePreprocessor(timeout=600, kernel_name="python3", allow_errors=False)
+        resources = {"metadata": {"path": str(nb_path.parent)}}
+        nb, resources = ep.preprocess(nb, resources=resources)
+
     output_basename = nb_path.stem + ".pdf"
     out_path = out_dir / output_basename
     if out_path.exists() and not overwrite:
         return out_path
 
-    body, _ = exporter.from_filename(str(nb_path))
+    if execute:
+        body, _ = exporter.from_notebook_node(nb)
+    else:
+        body, _ = exporter.from_filename(str(nb_path))
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(body)
     return out_path
@@ -62,7 +106,9 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--notebooks-dir", default="notebooks", type=Path, help="Directory with .ipynb files (default relative to project root)")
     parser.add_argument("--output-dir", default=None, type=Path, help="Directory to write PDFs (default: same as notebooks)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing PDFs if they exist")
+    parser.add_argument("--no-execute", action="store_true", help="Do not execute notebooks before exporting (use existing outputs only)")
     args = parser.parse_args(argv)
+    execute = not args.no_execute
 
     nb_dir = args.notebooks_dir
     # If the notebooks dir is relative and not found from the current working directory,
@@ -90,7 +136,7 @@ def main(argv: List[str] | None = None) -> int:
     failures = []
     for nb in notebooks:
         try:
-            pdf_path = export_notebook_to_pdf(nb, out_dir, overwrite=args.overwrite)
+            pdf_path = export_notebook_to_pdf(nb, out_dir, overwrite=args.overwrite, execute=execute)
             print(f"✓ {nb.name} -> {pdf_path}")
             successes += 1
         except Exception as e:
