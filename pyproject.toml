@@ -1,0 +1,14 @@
+[project]
+name = "applaudo"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb==1.4.0",
+    "gurobipy==12.0.3",
+    "nbconvert[webpdf]>=7.16.6",
+    "notebook>=7.4.5",
+    "pandas==2.3.2",
+    "plotly==6.3.0",
+    "statsmodels==0.14.5",
+]
